@@ -1,0 +1,13 @@
+{
+  "name": "ldplayer-1440x2560-dpi640",
+  "width": 1440,
+  "height": 2560,
+  "densityDpi": 640,
+  "orientation": "portrait",
+  "skins": [
+    "purple-groupbuy",
+    "pink-bawangcan"
+  ],
+  "autoX": "6.5.8",
+  "customImport": "entry-only"
+}

@@ -1,0 +1,14 @@
+Douyin Live Fudai Helper / 抖音直播间福袋挂机助手
+
+This distribution contains code derived from or developed upon:
+https://github.com/zzlKevin/tiktok-fudai
+Original license: Apache License 2.0 (see LICENSE).
+
+Modifications include group-buy task state recognition, LDPlayer-specific
+1440x2560 templates, screenshot/window guards, retry handling, an isolated
+release menu and custom entry-image import and validation.
+
+Third-party names, trademarks and interface imagery remain the property of
+their respective owners. This project is not endorsed by Douyin, AutoX or
+LDPlayer. The code license does not grant rights to third-party trademarks
+or interface imagery.

@@ -1,0 +1,9 @@
+custom/
+*.jsonl
+*-startup-*.json
+*-actions-*.jsonl
+*.apk
+*.zip
+node_modules/
+.DS_Store
+Thumbs.db
