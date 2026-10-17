@@ -58,13 +58,13 @@ __startupCheckpoint("before_auto_call");
 auto();
 __startupCheckpoint("after_auto_call", (typeof auto.service !== "undefined" && auto.service !== null) ? "service_nonnull" : "service_null_or_unreported");
 
-var __releaseArgs = {};
-try { __releaseArgs = engines.myEngine().execArgv || {}; } catch (e) {}
 const CONFIG = {
-    mode: (typeof __releaseArgs.mode === "string" ? __releaseArgs.mode : "live"), // 启动时确认一次，仅处理已识别的免费任务。
+    mode: (typeof engines.myEngine().execArgv.mode === "string" ? engines.myEngine().execArgv.mode : "live"), // 启动时确认一次，仅处理已识别的免费任务。
     packageName: "com.ss.android.ugc.aweme",
 
     // 候选项与证据级别见 outputs/README.md。
+    shareRecipient: "", // 用户明确指定的唯一分享收件人。
+    commentTaskEnabled: true, // 用户已授权按福袋要求发送参与评论。
     startTaskLabels: ["开始观看直播任务 参与抽奖"], // 来自用户描述；手机 UI 树未见过
     taskCompleteLabels: ["观看任务已完成", "任务已完成", "参与成功 等待抽奖", "参与成功 等待开奖"], // 均待实机核对
     bagEntryLabels: ["生活服务-直播-福袋"], // 曾在 UI dump 中读到 Button content-desc
@@ -81,6 +81,20 @@ const CONFIG = {
     nextRoundDelayMs: 3000
 };
 
+// Per-emulator recipient configuration; absent configuration keeps the original default.
+CONFIG.shareRecipientType = "user";
+try {
+    var recipientConfigPath = __startupScriptPath.replace(/^file:\/\//, "").replace(/\/[^\/]*$/, "") + "/share-recipient.json";
+    if (files.exists(recipientConfigPath)) {
+        var recipientSettings = JSON.parse(files.read(recipientConfigPath));
+        if (typeof recipientSettings.name === "string" && recipientSettings.name.trim() &&
+            (recipientSettings.type === "user" || recipientSettings.type === "group")) {
+            CONFIG.shareRecipient = recipientSettings.name.trim();
+            CONFIG.shareRecipientType = recipientSettings.type;
+        }
+    }
+} catch (e) { __startupCheckpoint("share_recipient_config_error", String(e)); exit(); }
+
 // Crops are taken from this LDPlayer instance at native 1440x2560; all matches
 // use simulator-only templates under the adjacent assets/fudai-1440x2560 folder.
 const IMAGE_CONFIG = {
@@ -89,15 +103,24 @@ const IMAGE_CONFIG = {
     assetDir: __startupScriptPath.replace(/^file:\/\//, "").replace(/\/[^\/]*$/, "") + "/assets/fudai-1440x2560/",
     threshold: 0.93,
     regions: {
+        recoveryAvatar: [40, 130, 160, 150],
         bag: [20, 400, 210, 200],
         panel: [500, 890, 440, 150],
         pinkPanel: [360, 800, 900, 220],
-        taskRow: [40, 1940, 1360, 180],
+        taskRow: [40, 1840, 1360, 300],
         action: [40, 2160, 1360, 250],
         result: [120, 540, 1200, 1400]
     }
 };
 
+var importedBagNames = [];
+try {
+    var importedManifest = IMAGE_CONFIG.assetDir + "imported-bags.json";
+    if (files.exists(importedManifest)) {
+        var importedList = JSON.parse(files.read(importedManifest));
+        if (Array.isArray(importedList)) importedBagNames = importedList.filter(function(n){return /^custom_bag_\d+$/.test(String(n));}).slice(0,8);
+    }
+} catch (e) { __startupCheckpoint("custom_bag_manifest_error", String(e)); }
 var RELEASE_ROOT = __startupScriptPath.replace(/^file:\/\//, "").replace(/\/[^\/]*$/, "");
 var entrySupport = require(RELEASE_ROOT + "/lib/entries.js");
 var importedEntries = entrySupport.load(files, RELEASE_ROOT);
@@ -202,8 +225,7 @@ function checkCanContinue() {
         return false;
     }
     if (!isDouyinForeground()) {
-        stopRequested = true;
-        log("抖音不在前台，停止。");
+        log("抖音不在前台，暂停点击，等待恢复检测。");
         return false;
     }
     return true;
@@ -301,6 +323,24 @@ function findVisualState() {
         const pinkWatchLabel = pinkWatching && matchImage(frame, "pink_watch_label", "taskRow");
         if (pinkWatching && pinkWatchLabel) return { kind: "watching", skin: "pink", evidence: visualEvidence.slice(0) };
 
+        const shareLabel = matchImage(frame, "share_task_label", "taskRow");
+        if (shareLabel) {
+            var shareCta = matchImage(frame, "share_start_cta", "action");
+            if (!shareCta) {
+                var shareNode = findExact(["分享直播间", "分享直播间 参与抽奖"]);
+                var sharePoint = shareNode && nodeCenter(shareNode);
+                if (sharePoint && sharePoint.y >= 2160 && sharePoint.y <= 2410) shareCta = sharePoint;
+            }
+            if (shareCta) return {kind:"share_task", point:shareCta, evidence:visualEvidence.slice(0)};
+        }
+        const pinkCommentLabel = CONFIG.commentTaskEnabled && matchImage(frame, "pink_comment_label", "taskRow");
+        const pinkCommentCta = pinkCommentLabel && matchImage(frame, "pink_comment_cta", "action");
+        if (pinkCommentCta) return {kind:"comment_task", skin:"pink", point:pinkCommentCta, evidence:visualEvidence.slice(0)};
+        const commentLabel = CONFIG.commentTaskEnabled && matchImage(frame, "comment_task_label", "taskRow");
+        const commentSuccess = commentLabel && matchImage(frame, "participation_success_cta", "action");
+        if (commentSuccess) return {kind:"success", task:"comment", evidence:visualEvidence.slice(0)};
+        const commentStart = commentLabel && (matchImage(frame, "comment_start_cta", "action") || matchImage(frame, "comment_only_cta", "action"));
+        if (commentStart) return {kind:"comment_task", point:commentStart, evidence:visualEvidence.slice(0)};
         const success = matchImage(frame, "participation_success_cta", "action");
         const completeRow = success && matchImage(frame, "watch_complete_row", "taskRow");
         if (success && completeRow) return { kind: "success", evidence: visualEvidence.slice(0) };
@@ -317,6 +357,10 @@ function findVisualState() {
         if (panel) return { kind: "panel_unknown", evidence: visualEvidence.slice(0) };
         const pinkPanel = matchImage(frame, "pink_panel", "pinkPanel");
         if (pinkPanel) return { kind: "panel_unknown", skin: "pink", evidence: visualEvidence.slice(0) };
+        for (var importedIndex = 0; importedIndex < importedBagNames.length; importedIndex++) {
+            var importedBag = matchImage(frame, importedBagNames[importedIndex], "bag", 0.95);
+            if (importedBag) return {kind: "bag_entry", skin: "custom", point: importedBag, evidence: visualEvidence.slice(0)};
+        }
         const face = matchImage(frame, "pink_entry_face", "bag");
         const teeth = face && matchImage(frame, "pink_entry_teeth", "bag");
         if (face && teeth && Math.abs(teeth.x - face.x - 31) <= 4 && Math.abs(teeth.y - face.y - 3) <= 4) {
@@ -554,7 +598,7 @@ if (CONFIG.mode !== "live") {
 }
 
 __startupCheckpoint("before_live_confirm");
-const liveConfirmed = dialogs.confirm("启动自动参与", "仅在目标抖音直播间运行；脚本仅打开福袋并点击免费任务。它不会支付、入团、购物或处理中奖。继续启动？");
+const liveConfirmed = dialogs.confirm("启动自动参与", "仅在目标抖音直播间运行；脚本打开福袋并参与免费观看任务或发送福袋指定评论，并按分享任务分享给设置的用户或群聊。它不会支付、入团、购物或处理中奖。继续启动？");
 __startupCheckpoint("after_live_confirm", String(liveConfirmed));
 if (!liveConfirmed) {
     log("未确认真实点击，安全退出。");
@@ -580,6 +624,22 @@ try {
 __startupCheckpoint("before_install_stop_key");
 installStopKey();
 __startupCheckpoint("after_install_stop_key");
+// Visual control page saves a separate, per-emulator room configuration.
+var liveRoomSettings = null;
+try {
+ var liveRoomPath = __startupScriptPath.replace(/^file:\/\//, "").replace(/\/[^\/]*$/, "") + "/live-room.json";
+ if (files.exists(liveRoomPath)) {
+  var roomSettings = JSON.parse(files.read(liveRoomPath));
+  if (roomSettings.enabled === true && /^\d{10,}$/.test(String(roomSettings.roomId))) liveRoomSettings = roomSettings;
+ }
+} catch(e) { __startupCheckpoint("live_room_config_error", String(e)); }
+var jumpControl = storages.create("fudai-jump-control");
+function isJumpPaused() { return jumpControl.get("paused", false) === true; }
+var roomMissingSince = 0;
+function openSavedRoom() {
+ app.startActivity({action:"android.intent.action.VIEW", data:"snssdk1128://live?room_id=" + liveRoomSettings.roomId, packageName:CONFIG.packageName});
+}
+if (liveRoomSettings && !isJumpPaused()) openSavedRoom();
 __startupCheckpoint("before_wait_for_douyin_foreground");
 if (!waitForDouyinForeground(60000)) exit();
 __startupCheckpoint("after_wait_for_douyin_foreground");
@@ -594,10 +654,188 @@ let consecutivePanelHiddenBagFrames = 0;
 let consecutiveStartFrames = 0;
 let startClickAttempts = 0;
 let lastStartClickAt = 0;
+let commentSentThisRound = false;
+let shareSentThisRound = false;
+var lastShareAt = 0;
+var shareRecordPath = String(context.getExternalFilesDir(null).getAbsolutePath()) + "/fudai-last-share.json";
+try { if (files.exists(shareRecordPath)) lastShareAt = Number(JSON.parse(files.read(shareRecordPath)).at) || 0; } catch (e) {}
+var lastCommentAt = 0;
+var commentRecordPath = String(context.getExternalFilesDir(null).getAbsolutePath()) + "/fudai-last-comment.json";
+try { if (files.exists(commentRecordPath)) lastCommentAt = Number(JSON.parse(files.read(commentRecordPath)).at) || 0; } catch (e) {}
+function shouldSendComment(sent, completed, lastAt, now) {
+    return (!sent || completed) && now - lastAt >= 60000;
+}
 function shouldStartTask(attempts, clicked, frames, elapsedMs) {
     return attempts < 2 && elapsedMs >= 3000 && (!clicked || frames >= 2);
 }
-while (checkCanContinue()) {
+// Follow the room selected by the user; recover only from its search-result card.
+var rememberedHost = "", lastHostReadAt = 0, lastRecoveryAttempt = 0;
+var searchCandidateKey = "", searchCandidateFrames = 0;
+function ownsRun() {
+    if (stopRequested) return false;
+    try { return String(files.read(runLeasePath)) === __startupRunId; }
+    catch (e) { return false; }
+}
+function hostKey(value) {
+    return String(value || "").replace(/[\s·•・.。…【】\[\]（）()：:—_-]/g, "");
+}
+function matchesRememberedHost(candidate, remembered) {
+    var a = hostKey(candidate), b = hostKey(remembered);
+    if (!a || b.length < 4 || /(?:\.\.\.|…)/.test(String(remembered))) return false;
+    if (a.indexOf(b) >= 0) return true;
+    var n = 0; while (n < a.length && n < b.length && a.charAt(n) === b.charAt(n)) n++;
+    return n >= Math.max(6, Math.min(10, b.length));
+}
+function rememberCurrentHost() {
+    if (Date.now() - lastHostReadAt < 15000) return;
+    lastHostReadAt = Date.now();
+    try {
+        var nodes = textMatches(/.+/).find(), candidates = [];
+        for (var i = 0; i < nodes.size(); i++) {
+            var node = nodes.get(i), b = node.bounds(), label = normalize(node.text());
+            if (b.left >= device.width * 0.11 && b.left <= device.width * 0.30 &&
+                b.top >= device.height * 0.045 && b.bottom <= device.height * 0.12 &&
+                label.length >= 4 && !/(看过|认证|直播广场|\.\.\.|…)/.test(label)) candidates.push(label);
+        }
+        if (candidates.length === 1 && candidates[0] !== rememberedHost) {
+            rememberedHost = candidates[0];
+            commentSentThisRound = false;
+            shareSentThisRound = false;
+            clickedStartThisRound = false; successSeen = false; startClickAttempts = 0;
+            searchCandidateFrames = 0;
+            __auditAction("manual_room_remembered", rememberedHost);
+        }
+    } catch (e) { __startupCheckpoint("host_read_error", String(e)); }
+}
+function findSearchLiveEntry() {
+    if (!rememberedHost) return null;
+    var heading = findExact(["团购直播"]);
+    if (!heading || !findExact(["综合"]) || !findExact(["直播"])) return null;
+    var hb = heading.bounds();
+    if (hb.top < device.height * 0.15 || hb.top > device.height * 0.40) return null;
+    var nodes = textMatches(/.+/).find(), matches = [];
+    for (var i = 0; i < nodes.size(); i++) {
+        var node = nodes.get(i), b = node.bounds(), label = normalize(node.text());
+        if (b.left < device.width * 0.20 || b.top < hb.bottom ||
+            b.top > hb.bottom + device.height * 0.17 || b.bottom > device.height * 0.49) continue;
+        if (!matchesRememberedHost(label, rememberedHost)) continue;
+        var x = Math.round((hb.left + b.left) / 2);
+        var y = Math.round(b.top + device.height * 0.025);
+        if (x < device.width * 0.04 || x > device.width * 0.24 || y <= hb.bottom) continue;
+        matches.push({x:x, y:y, host:label});
+    }
+    return matches.length === 1 ? matches[0] : null;
+}
+function ensureLiveRoom() {
+    if (isJumpPaused()) { roomMissingSince = 0; searchCandidateFrames = 0; return isDouyinForeground(); }
+    if (!isDouyinForeground() && !liveRoomSettings) { searchCandidateFrames = 0; return false; }
+    var activity = String(currentActivity());
+    if (/(?:LivePlayActivity|DialogWithWindowVisibility|SheetBaseDialog)$/.test(activity)) {
+        roomMissingSince = 0; rememberCurrentHost(); searchCandidateFrames = 0; return true;
+    }
+    if (liveRoomSettings) {
+        if (isDouyinForeground() && findExact(CONFIG.blockingLabels.concat(CONFIG.winnerLabels))) { stopRequested = true; return false; }
+        if (!roomMissingSince) roomMissingSince = Date.now();
+        if (Date.now() - roomMissingSince >= 6000 && Date.now() - lastRecoveryAttempt >= 15000 && ownsRun()) {
+            lastRecoveryAttempt = Date.now();
+            try { openSavedRoom(); __auditAction("saved_link_reentry", String(liveRoomSettings.roomId)); } catch(e) { __startupCheckpoint("room_reentry_error",String(e)); }
+        }
+        return false;
+    }
+    // The search heading and matching host are mandatory even if activity names change.
+    var entry = findSearchLiveEntry();
+    if (!entry) { searchCandidateFrames = 0; return true; }
+    if (findExact(CONFIG.blockingLabels.concat(CONFIG.winnerLabels))) { stopRequested = true; return false; }
+    var key = entry.host + ":" + entry.x + ":" + entry.y;
+    searchCandidateFrames = key === searchCandidateKey ? searchCandidateFrames + 1 : 1;
+    searchCandidateKey = key;
+    if (searchCandidateFrames < 2 || Date.now() - lastRecoveryAttempt < 5000) return false;
+    if (!ownsRun()) return false;
+    lastRecoveryAttempt = Date.now();
+    if (clickImagePoint(entry, "搜索结果中当前主播的直播头像")) {
+        __auditAction("search_room_reentry", rememberedHost, {matchedHost:entry.host, point:[entry.x,entry.y]});
+        clickedStartThisRound = false; successSeen = false; startClickAttempts = 0;
+        consecutiveStartFrames = 0; consecutivePanelHiddenBagFrames = 0;
+    }
+    searchCandidateFrames = 0;
+    return false;
+}
+function waitShareNode(labels, timeoutMs) {
+    var deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && ownsRun() && isDouyinForeground()) {
+        var n = findExact(labels); if (n) return n; sleep(300);
+    }
+    return null;
+}
+function onlyNamedRecipientSelected(descriptions, recipient) {
+    if (descriptions.length !== 1) return false;
+    var parts=String(descriptions[0]).split(/[,，]/).map(function(v){return v.trim();}).filter(function(v){return v && v !== "已选中";});
+    return parts.length === 1 && parts[0] === recipient;
+}
+function findShareSendButton() {
+    var lists = [textMatches(/.*发送.*/).find(), descMatches(/.*发送.*/).find(), idMatches(/.*:id\/send$/).find()];
+    for (var j=0;j<lists.length;j++) {
+        for (var k=0;k<lists[j].size();k++) {
+            var node=lists[j].get(k);
+            var t=String(node.text() || "").replace(/[^\u4e00-\u9fff]/g, "");
+            var d=String(node.desc() || "").replace(/[^\u4e00-\u9fff]/g, "");
+            if(t !== "发送" && d !== "发送" && !/:id\/send$/.test(String(node.id() || ""))) continue;
+            for(var depth=0;node && depth<4;depth++,node=node.parent()) {
+                var b=node.bounds();
+                if(b.width()>device.width*0.5 && b.height()<device.height*0.2 &&
+                    b.top>device.height*0.55 && b.bottom<=device.height && node.enabled() && node.clickable()) return node;
+            }
+        }
+    }
+    return null;
+}
+function waitShareSendButton() {
+    var deadline=Date.now()+20000;
+    while (Date.now()<deadline && ownsRun() && isDouyinForeground()) {
+        var button=findShareSendButton(); if(button) return button; sleep(300);
+    }
+    return null;
+}
+function submitShareTask(point) {
+    if (!clickImagePoint(point, "打开福袋分享任务")) return false;
+    if (!waitShareNode(["分享给"], 8000)) return false;
+    if (!ownsRun()) return false;
+    var recipientPattern = new RegExp("^" + escapeRegex(CONFIG.shareRecipient) +
+        (CONFIG.shareRecipientType === "group" ? "(?:[（(]\\d+[）)])?" : "") + "$");
+    var recipients = textMatches(recipientPattern).find();
+    if (recipients.size() !== 1) { log("分享对象不唯一或未找到，保留界面等待处理。"); return false; }
+    var existing = descMatches(/.*已选中.*/).find();
+    if (existing.size() !== 0) { log("分享面板已有选中对象，本次不发送。"); return false; }
+    var recipient = recipients.get(0);
+    if (!clickImagePoint(nodeCenter(recipient), "选择分享对象：" + CONFIG.shareRecipient)) return false;
+    var sendNode = waitShareSendButton();
+    if (!sendNode || !ownsRun()) { __startupCheckpoint("share_send_button_missing", String(currentActivity())); return false; }
+    var selected = descMatches(/.*已选中.*/).find(), descriptions = [];
+    for (var i=0;i<selected.size();i++) descriptions.push(String(selected.get(i).desc()));
+    var recipientVerified = onlyNamedRecipientSelected(descriptions, CONFIG.shareRecipient);
+    // Group share cards expose a selected-badge child instead of an updated description.
+    if (!recipientVerified && descriptions.length === 0 && CONFIG.shareRecipientType === "group") {
+        var badges = idMatches(/.*:id\/lge$/).find();
+        var card = recipient.parent(), cardBounds = card && card.bounds();
+        if (badges.size() === 1 && cardBounds) {
+            var badgeBounds = badges.get(0).bounds();
+            recipientVerified = badgeBounds.left >= cardBounds.left && badgeBounds.right <= cardBounds.right &&
+                badgeBounds.top >= cardBounds.top && badgeBounds.bottom <= cardBounds.bottom;
+            if (recipientVerified) descriptions = ["已选中," + CONFIG.shareRecipient];
+        }
+    }
+    if (!recipientVerified) {
+        log("选中收件人与指定用户不一致，本次不发送。"); return false;
+    }
+    lastShareAt = Date.now();
+    try { files.write(shareRecordPath, JSON.stringify({at:lastShareAt, host:rememberedHost, recipient:CONFIG.shareRecipient})); }
+    catch (e) { log("分享去重记录保存失败，不发送。"); return false; }
+    __auditAction("share_submit", CONFIG.shareRecipient, {host:rememberedHost, selected:descriptions});
+    return clickImagePoint(nodeCenter(sendNode), "发送当前直播间给：" + CONFIG.shareRecipient);
+}
+while (ownsRun()) {
+    if (!ensureLiveRoom()) { sleep(500); continue; }
+    if (!checkCanContinue()) { sleep(500); continue; }
     __startupCheckpoint("live_loop_iteration");
     __startupCheckpoint("before_blocking_label_scan");
     const blocked = findExact(CONFIG.blockingLabels.concat(CONFIG.winnerLabels));
@@ -629,6 +867,8 @@ while (checkCanContinue()) {
         log("未中奖弹窗已关闭并经截图核验；等待下一轮福袋。");
         clickedStartThisRound = false;
         startClickAttempts = 0;
+        commentSentThisRound = false;
+        shareSentThisRound = false;
         panelMayBeOpen = false;
         successSeen = false;
         panelOpenAttemptsWhileHidden = 0;
@@ -644,6 +884,27 @@ while (checkCanContinue()) {
         startClickAttempts = 0;
         panelMayBeOpen = true;
         panelOpenAttemptsWhileHidden = 0;
+    } else if (visual.kind === "share_task") {
+        if (!CONFIG.shareRecipient) { stopRequested = true; log("请先配置分享收件人 share-recipient.json"); continue; }
+        panelMayBeOpen = true; panelOpenAttemptsWhileHidden = 0;
+        if ((!shareSentThisRound || successSeen) && Date.now() - lastShareAt >= 60000) {
+            shareSentThisRound = true; successSeen = false;
+            if (!submitShareTask(visual.point)) {
+                log("分享未完成或结果不确定，保留现场并停止，避免误发或重复发。"); break;
+            }
+            panelMayBeOpen = false;
+        }
+    } else if (visual.kind === "comment_task") {
+        panelMayBeOpen = true; panelOpenAttemptsWhileHidden = 0;
+        if (shouldSendComment(commentSentThisRound, successSeen, lastCommentAt, Date.now())) {
+            // Mark before clicking: failed or uncertain submissions must not produce repeated comments.
+            lastCommentAt = Date.now(); commentSentThisRound = true; successSeen = false;
+            try { files.write(commentRecordPath, JSON.stringify({at:lastCommentAt, host:rememberedHost})); }
+            catch (e) { log("评论去重记录保存失败，本次不发送：" + e); continue; }
+            __auditAction("comment_task_submit", "福袋指定评论", {host:rememberedHost, matches:visual.evidence || []});
+            if (!clickImagePoint(visual.point, "发送评论 参与抽奖（福袋指定内容）")) break;
+            log("已点击评论参与，等待完成状态；同轮不重复发送。");
+        }
     } else if (visual.kind === "start_task") {
         consecutiveStartFrames++;
         if (successSeen) {
